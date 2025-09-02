@@ -1,0 +1,9 @@
+# Copyright (c) 2021 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  i2c temp/humi sensor
+
+compatible: "sen0546"
+
+include: [sensor-device.yaml, i2c-device.yaml]

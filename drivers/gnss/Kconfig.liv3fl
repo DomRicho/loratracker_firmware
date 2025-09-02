@@ -1,0 +1,29 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+config LIV3FL
+	bool "ST Teseo-LIV3FL GNSS module"
+	default y
+	depends on GNSS
+	depends on DT_HAS_ST_LIV3FL_ENABLED
+	depends on GNSS_REFERENCE_FRAME_WGS84
+	select MODEM_MODULES
+	select MODEM_BACKEND_UART
+	select MODEM_CHAT
+    select GNSS_ST_PROTO
+	help
+        ST Teseo-Liv3fl GNSS module
+
+if LIV3FL
+
+config GNSS_LIV3FL_SATELLITES_COUNT
+	int "Maximum satellite count"
+	depends on GNSS_SATELLITES
+	default 24
+	help
+	  Maximum number of satellite that the driver that can be decoded from
+	  the GNSS device. This does not affect the number of devices that the
+	  device is actually tracking, just how many of those can be reported
+	  in the satellites callback.
+
+endif

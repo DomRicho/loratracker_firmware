@@ -1,0 +1,5 @@
+config GNSS_ST_PROTO
+	bool "Support for LIV3FL Driver"
+	help
+	  Support for LIV3FL driver
+

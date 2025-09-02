@@ -1,0 +1,160 @@
+/dts-v1/;
+#include <st/h7/stm32h7b0Xb.dtsi>
+#include <st/h7/stm32h7b0rbtx-pinctrl.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	model = "LoRa Track HAT";
+	compatible = "domricho,loratrack_hat";
+
+	chosen {
+		zephyr,console = &uart5;
+        zephyr,flash = &flash0;
+        zephyr,sram = &sram0;
+	};
+
+	leds: leds {
+		compatible = "gpio-leds";
+
+		green_led: led_2 {
+			gpios = <&gpiob 8 GPIO_ACTIVE_HIGH>;
+			label = "User LD2";
+		};
+
+		red_led: led_1 {
+			gpios = <&gpioc 11 GPIO_ACTIVE_HIGH>;
+			label = "User LD1";
+		};
+
+		yellow_led: led_0 {
+			gpios = <&gpioc 10 GPIO_ACTIVE_HIGH>;
+			label = "User LD0";
+		};
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		user_button0: button_0 {
+			label = "User sw0";
+			gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+		user_button1: button_1 {
+			label = "User sw1";
+			gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+
+	aliases {
+		led2 = &green_led;
+		led1 = &red_led;
+		led0 = &yellow_led;
+		sw0 = &user_button0;
+        sw1 = &user_button1;
+        lora0 = &semtech_sx1272;
+        gnss = &liv3fl;
+		watchdog0 = &iwdg;
+	};
+
+};
+
+&clk_lsi {
+	status = "okay";
+};
+
+&clk_hsi48 {
+	status = "okay";
+};
+
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(25)>;
+	status = "okay";
+};
+
+&clk_lse {
+	status = "disabled";
+};
+
+
+&pll {
+	div-m = <5>;
+	mul-n = <112>;
+	div-p = <2>;
+	div-q = <2>;
+	div-r = <2>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(280)>;
+	d1cpre = <1>;
+	hpre = <1>;
+	d1ppre = <2>;
+	d2ppre1 = <2>;
+	d2ppre2 = <2>;
+	d3ppre = <2>;
+};
+
+&uart4 {
+	pinctrl-0 = <&uart4_tx_pa12 &uart4_rx_pa11>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "okay";
+    liv3fl: gnss {
+        compatible = "st,liv3fl";
+        reset-gpios = <&gpioa 2 (GPIO_ACTIVE_LOW | GPIO_PULL_DOWN)>;
+        /* pps-gpios = <&gpiob 10 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>; */
+        /* pps-mode = "GNSS_PPS_MODE_ENABLED"; */
+    };
+};
+
+&uart5 {
+	pinctrl-0 = <&uart5_tx_pc12 &uart5_rx_pd2>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "okay";
+    raspberry_pi_header: rpi_header {
+        compatible = "rpi,gpio_header";
+        dio-gpios = <&gpioa 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>,
+                    <&gpioa 1 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+        status = "okay";
+    };
+};
+
+&spi1 {
+	status = "okay";
+	pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+    semtech_sx1272: lora@0 {
+        compatible = "semtech,sx1272";
+        status = "okay";
+        reg = <0x0>;
+        spi-max-frequency = <3000000>;
+
+        reset-gpios = <&gpioa 10 GPIO_ACTIVE_HIGH>;
+
+        dio-gpios = <&gpioa 9   (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>, // DIO0
+                    <&gpioa 8   (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>, // DIO1
+                    <&gpioc 9   (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>, // DIO2
+                    <&gpioc 7   (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>; // DIO3
+
+        power-amplifier-output = "rfo";
+    };
+};
+
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+	pinctrl-names = "default";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+    sen0546: sen0546@44 {
+        compatible = "sen0546";
+        reg = <0x44>;
+        status = "okay";
+    };
+};

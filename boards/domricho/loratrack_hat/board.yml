@@ -1,0 +1,7 @@
+board:
+  name: loratrack_hat
+  full_name: LoRa Track HAT
+  vendor: domricho
+  socs:
+    - name: stm32h7b0xx
+

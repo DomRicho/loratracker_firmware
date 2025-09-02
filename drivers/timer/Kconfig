@@ -1,0 +1,21 @@
+
+menuconfig TIMERS
+	bool "TIMERS Drivers"
+	help
+	  This option enables the TIMERS custom driver class.
+
+if TIMERS
+
+config TIMERS_INIT_PRIORITY
+	int "Blink device drivers init priority"
+	default KERNEL_INIT_PRIORITY_DEVICE
+	help
+	  TIMERS device drivers init priority.
+
+module = TIMERS
+module-str = timers
+source "subsys/logging/Kconfig.template.log_config"
+
+rsource "Kconfig.liv3fl"
+
+endif # TIMERS

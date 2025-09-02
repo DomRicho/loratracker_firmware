@@ -1,0 +1,26 @@
+# Copyright 2023 Google LLC
+# SPDX-License-Identifier: Apache-2.0
+
+compatible: "st,liv3fl"
+
+description: |
+  ST Teseo-LIV3FL Binding
+
+include: [gnss-nmea-generic.yaml]
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Reset GPIO
+  # pps-gpios:
+  #   type: phandle-array
+  #   required: false
+    description: Pulse Per Second GPIO
+  initial-baudrate:
+    type: int
+    default: 9600
+    enum: [4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800]
+  fix-rate:
+    type: int
+    default: 1000

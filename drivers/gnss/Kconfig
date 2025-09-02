@@ -1,0 +1,23 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig GNSS
+	bool "GNSS Drivers"
+	help
+	  This option enables the GNSS custom driver class.
+
+if GNSS
+
+config GNSS_INIT_PRIORITY
+	int "Blink device drivers init priority"
+	default KERNEL_INIT_PRIORITY_DEVICE
+	help
+	  GNSS device drivers init priority.
+
+module = GNSS
+module-str = gnss
+source "subsys/logging/Kconfig.template.log_config"
+
+rsource "Kconfig.liv3fl"
+
+endif # GNSS

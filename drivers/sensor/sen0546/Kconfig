@@ -1,0 +1,9 @@
+# Copyright (c) 2021 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+config SEN0546
+	bool "sen0546 Temp/Humi Sensor"
+	default y
+	depends on DT_HAS_SEN0546_ENABLED
+	help
+	  I2C digital temperature & humidity sensor
