@@ -47,17 +47,23 @@ static int sen0546_channel_get(const struct device *dev,
 
     int ret = 0;
 
+    double value = 0;
+
     switch(chan) {
         case SENSOR_CHAN_AMBIENT_TEMP:
+            value = -45.0 + 175.0 * (data->temp / 65535.0);
+            break;
         case SENSOR_CHAN_HUMIDITY:
+            value = 100.0 * (data->humi / 65535.0);
             break;
         default:
             return -ENOTSUP;
     }
-
-    float temp = -45.0 + 175.0 * (data->temp / 65535.0);
-    float humi = 100.0 * (data->humi / 65535.0);
-
+    // val->val1 = (int32_t)value;
+    // val->val2 = (value - val->val1) * 1000000;
+    // LOG_INF("%u.%u Degrees", val->val1, val->val2);
+    val->val1 = data->temp;
+    val->val2 = data->humi;
 	return ret;
 }
 

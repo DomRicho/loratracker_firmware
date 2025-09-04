@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
@@ -19,28 +20,45 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(gateway);
 
+#define SERIAL_NUMBER "GW0"
+
 #define DAYS_BEFORE_AUG_2025 20301ULL
 #define SECONDS_BEFORE_AUG_2025 (DAYS_BEFORE_AUG_2025 * 86400ULL)
 
 /* 1 tick = 1 / 280,000,00 */
 #define NS_PER_TICK 3.57142857143D
 
+K_FIFO_DEFINE(cmd_fifo);
+
+enum cmd_type {
+    CMD_LORA,
+    CMD_WEATHER,
+    CMD_NAV,
+    CMD_TIME,
+};
+
 int init_gpios(void);
 int init_lora(const struct device** lora_dev);
 int init_tim2(void);
 int init_sen0546(const struct device** sen0546);
+int print_command(char *talker_id, void *data, enum cmd_type data_type);
 
-struct lora_data {
-    uint32_t source_id;
-    uint32_t timestamp_utc;
-    uint32_t ns_ticks;
-    uint16_t rssi;
-    uint8_t snr;
-    uint8_t temp;
-    uint8_t humi;
+struct cmd {
+    void *fifo_reserved;
+    enum cmd_type type;
+    void *data;
 };
 
-struct lora_data data_array[32] = {0};
+struct weather_data {
+    int16_t temp;
+    uint16_t humi;
+};
+
+struct nav_data {
+    struct navigation_data location;
+    enum gnss_fix_status status;
+    uint8_t poshold;
+};
 
 struct navigation_data location;
 
@@ -57,13 +75,16 @@ uint32_t utc_timestamp = SECONDS_BEFORE_AUG_2025;
 uint32_t lora_ticks = 0;
 uint32_t prev_lora_ticks = 0;
 uint32_t prev_pps_ticks = 0;
-uint32_t pps_ticks = 0;;
+uint32_t pps_ticks = 0;
 uint8_t pos_hold_flag = 0;
+uint8_t sample_flag = 0;
 
 static void gnss_cb(const struct device *dev, const struct gnss_data *data)
 {
     if (data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
         LOG_WRN("Invalid Fix...");
+        pos_hold_flag = 0;
+        sample_flag = 0;
     } else {
         if (data->info.pos_hold == 1) {
             gpio_pin_toggle_dt(&led2);
@@ -87,55 +108,179 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
                 LOG_INF("Hold Lat/Log: %lld / %lld", location.latitude, location.longitude);
             }
         } else {
-            LOG_WRN("Taking Samples...");
+            if (sample_flag == 0) {
+                LOG_WRN("Taking Samples...");
+                sample_flag = 1;
+            }
         }
     }
 }
 GNSS_DATA_CALLBACK_DEFINE(NULL, gnss_cb);
 
-void lora_receive_cb(const struct device *dev, uint8_t *data, uint16_t size,
-		     int16_t rssi, int8_t snr, void *user_data)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(size);
-	ARG_UNUSED(user_data);
+struct lora_info {
+    uint16_t packet_id;
+    int8_t snr;
+    uint8_t data[255];
+    uint16_t size;
+    int16_t rssi;
+    uint32_t utc;
+    uint32_t ticks;
+};
 
-    prev_lora_ticks = lora_ticks;
-    lora_ticks = LL_TIM_IC_GetCaptureCH1(TIM2);
-    LOG_INF("Difference LoRa Ticks: %u", lora_ticks - prev_lora_ticks);
-    // uint32_t frac_time = floor((double)(lora_ticks - pps_ticks) * NS_PER_TICK); // nanoseconds
-	LOG_INF("LoRa Timestamp: %u s, %u ticks", utc_timestamp, lora_ticks - pps_ticks);
-	LOG_INF("LoRa RX RSSI: %d dBm, SNR: %d dB", rssi, snr);
-	LOG_HEXDUMP_INF(data, size, "LoRa RX payload");
-    // sensor_channel_get(sen0546, SENSOR_CHAN_AMBIENT_TEMP, &val);
-    gpio_pin_toggle_dt(&led1);
-}
 
 int main(void)
 {
-    const struct device *lora_dev = NULL;
-    const struct device *sen0546 = NULL;
     init_gpios();
-    init_lora(&lora_dev);
-    init_sen0546(&sen0546);
     init_tim2();
 
-	lora_recv_async(lora_dev, lora_receive_cb, NULL);
     while(1) {
         int val0 = gpio_pin_get_dt(&sw0);
         int val1 = gpio_pin_get_dt(&sw1);
         gpio_pin_set_dt(&led0, (!val0 | !val1)); 
         prev_pps_ticks = pps_ticks;
         pps_ticks = LL_TIM_IC_GetCaptureCH3(TIM2);
-        if (prev_pps_ticks != pps_ticks) {
-            if(sensor_sample_fetch(sen0546) < 0) {
-                LOG_ERR("Could not fetch sample");
-            }
+        if (pos_hold_flag == 1) {
         }
         k_msleep(50);
     }
     return(0);
 }
+
+
+K_SEM_DEFINE(info_fill_sem, 0, 1);
+K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
+K_MEM_SLAB_DEFINE(weather_slab, sizeof(struct weather_data), 10, 4);
+K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
+void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
+		     int16_t rssi, int8_t snr, void *user_data)
+{
+	ARG_UNUSED(dev);
+    struct lora_info *info = (struct lora_info*)user_data;
+    lora_ticks = LL_TIM_IC_GetCaptureCH1(TIM2);
+    info->utc = utc_timestamp;
+    info->ticks = lora_ticks;
+    info->rssi = rssi;
+    info->snr = snr;
+    memcpy(info->data, data, size);
+    info->size = size;
+    gpio_pin_toggle_dt(&led1);
+    k_sem_give(&info_fill_sem);
+    lora_recv_async(dev, NULL, NULL);
+}
+
+void lora_transceiver(void)
+{
+    const struct device *lora_dev = NULL;
+    init_lora(&lora_dev);
+    struct lora_info *info;
+    struct cmd *lora_cmd; 
+    while (1) {
+        // k_poll(struct k_poll_event *events, int num_events, k_timeout_t timeout)
+        k_mem_slab_alloc(&cmd_slab, (void**)&lora_cmd, K_FOREVER);
+        k_mem_slab_alloc(&lora_slab, (void**)&info, K_FOREVER);
+        lora_cmd->type = CMD_LORA;
+        lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
+        k_sem_take(&info_fill_sem, K_FOREVER);
+        lora_cmd->data = (void*)info; 
+        k_fifo_put(&cmd_fifo, lora_cmd);
+    }
+
+}
+#define LORA_THREAD_SIZE 1024
+#define LORA_THREAD_PRIO 5
+K_THREAD_DEFINE(lora_tid, LORA_THREAD_SIZE, lora_transceiver, NULL, NULL, NULL, LORA_THREAD_PRIO, 0, 0);
+
+void collect_weather_thread(void)
+{
+    const struct device *sen0546 = NULL;
+    struct sensor_value weather; 
+    struct cmd *weather_cmd; 
+    struct weather_data *data; 
+    init_sen0546(&sen0546);
+    while(1) {
+        k_mem_slab_alloc(&weather_slab, (void **)&data, K_FOREVER);
+        k_mem_slab_alloc(&cmd_slab, (void **)&weather_cmd, K_FOREVER);
+        weather_cmd->type = CMD_WEATHER;
+        if(sensor_sample_fetch(sen0546) < 0) {
+            LOG_ERR("Could not fetch sample");
+        }
+        if (sensor_channel_get(sen0546, SENSOR_CHAN_AMBIENT_TEMP, &weather) < 0) {
+            LOG_ERR("Could not get channel");
+        }
+        data->temp = (uint16_t)weather.val1;
+        data->humi = (uint16_t)weather.val2; 
+        weather_cmd->data = (void*)data; 
+        k_fifo_put(&cmd_fifo, weather_cmd);
+        k_msleep(1000);
+    }
+}
+#define WEATHER_THREAD_SIZE 1024
+#define WEATHER_THREAD_PRIO 5
+K_THREAD_DEFINE(weather_tid, WEATHER_THREAD_SIZE, collect_weather_thread, NULL, NULL, NULL, WEATHER_THREAD_PRIO, 0, 0);
+
+/*
+ * $GW0LORA,93,9,18000000000,1600000000*5c\r\n
+ */
+int send_command(void) 
+{
+    struct cmd *cmd;
+    char cmd_str[128];
+    uint8_t ret = 0;
+    uint8_t checksum = 0;
+    while(1) {
+        cmd = k_fifo_get(&cmd_fifo, K_FOREVER);
+        int len = 0;
+        cmd_str[len++] = '$';
+        strncpy(&cmd_str[len], SERIAL_NUMBER, 4);
+        len += 3;
+        switch(cmd->type) {
+            case CMD_LORA:
+                ret = snprintk(&cmd_str[len], 127 - len, "LORA,");
+                len += ret;
+                struct lora_info *info = (struct lora_info*)cmd->data;
+                ret = snprintk(&cmd_str[len], 127 - len, "%.8s,%d,%d,%u,%u*", (info->data), info->rssi, info->snr, info->utc, info->ticks);
+                len += ret;
+                LOG_INF("%u | %s", len, cmd_str);
+                k_mem_slab_free(&lora_slab, info);
+                break;
+            case CMD_NAV:
+                ret = snprintk(&cmd_str[len], 127 - len, "POS,");
+                len += ret;
+                break;
+            case CMD_WEATHER:
+                ret = snprintk(&cmd_str[len], 127 - len, "WTHR,");
+                len += ret;
+                struct weather_data *weather = (struct weather_data *)cmd->data;
+                ret = snprintk(&cmd_str[len], 127 - len, "%u,%u*", weather->temp, weather->humi);
+                len += ret;
+                k_mem_slab_free(&weather_slab, weather);
+                break;
+            case CMD_TIME:
+                ret = snprintk(&cmd_str[len], 127 - len, "TIME,");
+                len += ret;
+                uint32_t *time = (uint32_t*)cmd->data;
+                ret = snprintk(&cmd_str[len], 127 - len, "%u*", *time);
+                len += ret;
+                break;
+            default:
+                return -ENOTSUP;
+        }
+        checksum = 0;
+        for (int i = 1; i < len - 1; i++) {
+            checksum ^= (uint8_t)cmd_str[i]; 
+        }
+        ret = snprintk(&cmd_str[len], 127 - len, "%02x", checksum);
+        len += ret;
+        strncpy(&cmd_str[len], "\r\n", 3);
+        len += 3;
+        printk("%s", cmd_str);
+        k_mem_slab_free(&cmd_slab, cmd);
+    }
+    return 0;
+}
+#define CMD_THREAD_SIZE 1024
+#define CMD_THREAD_PRIO 5
+K_THREAD_DEFINE(cmd_tid, CMD_THREAD_SIZE, send_command, NULL, NULL, NULL, CMD_THREAD_PRIO, 0, 0);
 
 int init_gpios(void)
 {
