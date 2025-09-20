@@ -41,7 +41,7 @@ int main(void)
     char num[16] = {0};
     char tx_data[9] = {0};
 	while (1) {
-        snprintf(num, 16,"%08d", count);
+        snprintf(num, 16,"$EN0%04d", count);
         memcpy(tx_data, num, 8);
         tx_data[8] = '\0';
 		ret = lora_send(lora_dev, tx_data, 8);
@@ -52,10 +52,10 @@ int main(void)
 		LOG_INF("Data sent %s!", tx_data);
 
 
-        k_msleep(2500);
+        k_msleep(5000);
 
         count++;
-        if (count >= 10000000) count = 0;
+        if (count == 9999) count = 0;
 	}
 	return 0;
 }

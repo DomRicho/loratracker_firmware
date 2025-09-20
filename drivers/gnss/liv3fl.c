@@ -254,10 +254,9 @@ MODEM_CHAT_SCRIPT_CMDS_DEFINE(
     // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMRESTOREPAR*11\r\n", restore_ok),
     // MODEM_CHAT_SCRIPT_CMD_RESP("Hello World", init_finished),
     // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSETPAR,1102,0xA*10\r\n", setpar_ok), // Update Baudrate
-    // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMPPS,2,14,300*61\r\n", pps_ok), // set auto-hold position after 300 samples (5 minutes)
     // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSETPAR,1197,40*11\r\n", setpar_ok), // set pps clk to 64 MHz. Recom for timing
     MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSETPAR,1215,3C*6C\r\n", setpar_ok), // Auto-hold to 60 samples
-    // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSETPAR,1201,0000000004000042*1B", setpar_ok),
+    // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSETPAR,1201,0000000004000042*1B", setpar_ok), // change Commands
     // MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSETPAR,1228,0000000000000000*12", setpar_ok),
     MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMSAVEPAR*58\r\n", savepar_ok),
     MODEM_CHAT_SCRIPT_CMD_RESP("$PSTMGETPAR,1102*21\r\n", modem_chat_any_match),
