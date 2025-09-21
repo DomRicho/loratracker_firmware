@@ -1,7 +1,7 @@
 # Copyright (c) 2021 Legrand North America, LLC.
 # SPDX-License-Identifier: Apache-2.0
 
-menu "Custom libraries"
-rsource "gnss/Kconfig"
-rsource "lora/Kconfig"
-endmenu
+config LORA_SUPPORT
+	bool "LoRa Support"
+	help
+	  Support for LoRa driver

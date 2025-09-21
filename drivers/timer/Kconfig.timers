@@ -1,6 +1,0 @@
-
-config TIMERS_INPUT_CAPTURE
-    bool "STM32 Timer input capture"
-    default y
-    depends on COUNTER
-    select USE_STM32_HAL_TIM

@@ -5,7 +5,6 @@
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
-#include <zephyr/drivers/lora.h>
 #include <zephyr/drivers/gnss.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
@@ -26,11 +25,6 @@ LOG_MODULE_REGISTER(anchor);
 #define DAYS_BEFORE_AUG_2025 20301ULL
 #define SECONDS_BEFORE_AUG_2025 (DAYS_BEFORE_AUG_2025 * 86400ULL)
 
-/* 1 tick = 1 / 280,000,00 */
-#define NS_PER_TICK 3.57142857143D
-
-K_FIFO_DEFINE(cmd_fifo);
-
 enum cmd_type {
     CMD_LORA,
     CMD_WEATHER,
@@ -38,10 +32,12 @@ enum cmd_type {
     CMD_TIME,
 };
 
-int init_gpios(void);
-int init_lora(const struct device** lora_dev);
-int init_tim2(void);
-int print_command(char *talker_id, void *data, enum cmd_type data_type);
+enum gnss_state {
+    GNSS_INIT_STATE = 0,
+    GNSS_NO_FIX_STATE,
+    GNSS_SAMPLE_STATE, 
+    GNSS_POSHOLD_STATE,
+};
 
 struct cmd {
     void *fifo_reserved;
@@ -49,31 +45,31 @@ struct cmd {
     void *data;
 };
 
-struct navigation_data location;
+int init_gpios(void);
+int init_tim2(void);
+int print_command(char *talker_id, void *data, enum cmd_type data_type);
 
-struct cmd nav_data = { .type = CMD_NAV, .data = &location };
+K_SEM_DEFINE(info_fill_sem, 0, 1);
+K_FIFO_DEFINE(lora_tx_fifo);
+K_FIFO_DEFINE(cmd_fifo);
+K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
+K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
 
-#define LORA_MODEM DT_ALIAS(lora0)
 #define GNSS_MODEM DEVICE_DT_GET(DT_ALIAS(gnss))
+#define LORA_MODEM DT_ALIAS(lora0)
 static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 static const struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static const struct gpio_dt_spec sw1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
 
+struct navigation_data location;
+struct cmd nav_data = { .type = CMD_NAV, .data = &location };
 const int days_in_month[] = {31,28,31,30,31,30,31,31,30,31,30,31};
 uint32_t utc_timestamp = SECONDS_BEFORE_AUG_2025;
 uint32_t lora_ticks = 0;
-uint32_t prev_lora_ticks = 0;
 uint32_t prev_pps_ticks = 0;
 uint32_t pps_ticks = 0;
-
-enum gnss_state {
-    GNSS_INIT_STATE = 0,
-    GNSS_NO_FIX_STATE,
-    GNSS_SAMPLE_STATE, 
-    GNSS_POSHOLD_STATE,
-};
 
 enum gnss_state gnss_state = GNSS_INIT_STATE;
 
@@ -127,17 +123,6 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
 }
 GNSS_DATA_CALLBACK_DEFINE(NULL, gnss_cb);
 
-struct lora_info {
-    uint16_t packet_id;
-    int8_t snr;
-    uint8_t data[255];
-    uint16_t size;
-    int16_t rssi;
-    uint32_t utc;
-    uint32_t ticks;
-};
-
-
 int main(void)
 {
     init_gpios();
@@ -149,10 +134,21 @@ int main(void)
     return(0);
 }
 
+int init_lora(const struct device **lora_dev)
+{
+	*lora_dev = DEVICE_DT_GET(LORA_MODEM);
+    struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
+	if (!device_is_ready(*lora_dev)) {
+		LOG_ERR("%s Device not ready", (*lora_dev)->name);
+		return -1;
+	}
+	if (lora_config(*lora_dev, &lora_cfg) < 0) {
+		LOG_ERR("LoRa config failed");
+		return -1;
+	}
+    return 0;
+}
 
-K_SEM_DEFINE(info_fill_sem, 0, 1);
-K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
-K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
 void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
 		     int16_t rssi, int8_t snr, void *user_data)
 {
@@ -170,12 +166,6 @@ void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
     lora_recv_async(dev, NULL, NULL);
 }
 
-K_FIFO_DEFINE(lora_tx_fifo);
-struct lora_tx {
-    void *fifo_reserved;
-    uint8_t data[255];
-    uint16_t size;
-}; 
 void lora_transceiver(void)
 {
     const struct device *lora_dev = NULL;
@@ -247,13 +237,19 @@ int send_command(void)
         switch(cmd->type) {
             case CMD_LORA: ;
                 struct lora_info *info = (struct lora_info*)cmd->data;
-                ret = snprintk(&cmd_str[len], 127 - len, "LORA,%.8s,%d,%d,%u,%u*", (info->data), info->rssi, info->snr, info->utc, info->ticks);
+                ret = snprintk(&cmd_str[len], 127 - len, 
+                        "LORA,%.8s,%d,%d,%u,%u*", 
+                        info->data, info->rssi, info->snr, info->utc, info->ticks
+                    );
                 len += ret;
                 k_mem_slab_free(&lora_slab, info);
                 break;
             case CMD_NAV: ;
                 struct navigation_data *data = (struct navigation_data*)cmd->data;
-                ret = snprintk(&cmd_str[len], 127 - len, "POS,%lld,%lld,%d*", data->longitude, data->latitude, data->altitude);
+                ret = snprintk(&cmd_str[len], 127 - len, 
+                        "POS,%lld,%lld,%d*", 
+                        data->longitude, data->latitude, data->altitude
+                    );
                 len += ret;
                 break;
             case CMD_WEATHER:
@@ -308,21 +304,6 @@ int init_gpios(void)
     return 0;
 }
 
-int init_lora(const struct device **lora_dev)
-{
-	*lora_dev = DEVICE_DT_GET(LORA_MODEM);
-    struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
-    lora_cfg.tx = false;
-	if (!device_is_ready(*lora_dev)) {
-		LOG_ERR("%s Device not ready", (*lora_dev)->name);
-		return -1;
-	}
-	if (lora_config(*lora_dev, &lora_cfg) < 0) {
-		LOG_ERR("LoRa config failed");
-		return -1;
-	}
-    return 0;
-}
 
 int init_tim2(void)
 {

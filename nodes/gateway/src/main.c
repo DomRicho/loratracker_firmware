@@ -25,11 +25,6 @@ LOG_MODULE_REGISTER(gateway);
 #define DAYS_BEFORE_AUG_2025 20301ULL
 #define SECONDS_BEFORE_AUG_2025 (DAYS_BEFORE_AUG_2025 * 86400ULL)
 
-/* 1 tick = 1 / 280,000,00 */
-#define NS_PER_TICK 3.57142857143D
-
-K_FIFO_DEFINE(cmd_fifo);
-
 enum cmd_type {
     CMD_LORA,
     CMD_WEATHER,
@@ -37,11 +32,12 @@ enum cmd_type {
     CMD_TIME,
 };
 
-int init_gpios(void);
-int init_lora(const struct device** lora_dev);
-int init_tim2(void);
-int init_sen0546(const struct device** sen0546);
-int print_command(char *talker_id, void *data, enum cmd_type data_type);
+enum gnss_state {
+    GNSS_INIT_STATE = 0,
+    GNSS_NO_FIX_STATE,
+    GNSS_SAMPLE_STATE, 
+    GNSS_POSHOLD_STATE,
+};
 
 struct cmd {
     void *fifo_reserved;
@@ -60,7 +56,18 @@ struct nav_data {
     uint8_t poshold;
 };
 
-struct navigation_data location;
+K_SEM_DEFINE(info_fill_sem, 0, 1);
+K_FIFO_DEFINE(lora_tx_fifo);
+K_FIFO_DEFINE(cmd_fifo);
+K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
+K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
+K_MEM_SLAB_DEFINE(weather_slab, sizeof(struct weather_data), 3, 4);
+
+int init_gpios(void);
+int init_lora(const struct device** lora_dev);
+int init_tim2(void);
+int init_sen0546(const struct device** sen0546);
+int print_command(char *talker_id, void *data, enum cmd_type data_type);
 
 #define LORA_MODEM DT_ALIAS(lora0)
 #define GNSS_MODEM DEVICE_DT_GET(DT_ALIAS(gnss))
@@ -72,6 +79,8 @@ static const struct gpio_dt_spec sw1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
 
 int days_in_month[] = {31,28,31,30,31,30,31,31,30,31,30,31};
 uint32_t utc_timestamp = SECONDS_BEFORE_AUG_2025;
+struct navigation_data location;
+struct cmd nav_data = { .type = CMD_NAV, .data = &location };
 uint32_t lora_ticks = 0;
 uint32_t prev_lora_ticks = 0;
 uint32_t prev_pps_ticks = 0;
@@ -79,14 +88,37 @@ uint32_t pps_ticks = 0;
 uint8_t pos_hold_flag = 0;
 uint8_t sample_flag = 0;
 
+enum gnss_state gnss_state = GNSS_INIT_STATE;
+
 static void gnss_cb(const struct device *dev, const struct gnss_data *data)
 {
-    if (data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
-        LOG_WRN("Invalid Fix...");
-        pos_hold_flag = 0;
-        sample_flag = 0;
-    } else {
-        if (data->info.pos_hold == 1) {
+    prev_pps_ticks = pps_ticks;
+    pps_ticks = LL_TIM_IC_GetCaptureCH3(TIM2);
+    switch(gnss_state) {
+        case GNSS_INIT_STATE:
+            if (data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
+                LOG_WRN("Invalid Fix...");
+                gnss_state = GNSS_NO_FIX_STATE;
+            } else {
+                LOG_WRN("Sampling...");
+                gnss_state = GNSS_SAMPLE_STATE;
+            }
+            break;
+        case GNSS_NO_FIX_STATE:
+            if (data->info.fix_status != GNSS_FIX_STATUS_NO_FIX) {
+                LOG_WRN("Sampling...");
+                gnss_state = GNSS_SAMPLE_STATE;
+            }
+            break;
+        case GNSS_SAMPLE_STATE:
+            if (data->info.pos_hold == 1) {
+                memcpy(&location, &data->nav_hold, sizeof(struct navigation_data));
+                k_fifo_put(&cmd_fifo, &nav_data);
+                LOG_INF("Sampling Done.");
+                gnss_state = GNSS_POSHOLD_STATE;
+            }
+            break;
+        case GNSS_POSHOLD_STATE:
             gpio_pin_toggle_dt(&led2);
             struct gnss_time utc = data->utc;
             uint16_t days = 0;
@@ -101,56 +133,25 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
             utc_timestamp += utc.hour * 3600ULL;
             utc_timestamp += utc.minute * 60ULL;
             utc_timestamp += utc.millisecond / 1000ULL;
-            // LOG_INF("UTC Timestamp: %u", utc_timestamp);
-            if (pos_hold_flag == 0) {
-                memcpy(&location, &data->nav_hold, sizeof(struct navigation_data));
-                pos_hold_flag = 1;
-                LOG_INF("Hold Lat/Log: %lld / %lld", location.latitude, location.longitude);
-            }
-        } else {
-            if (sample_flag == 0) {
-                LOG_WRN("Taking Samples...");
-                sample_flag = 1;
-            }
-        }
+            break;
+        default:
+            break;
     }
 }
 GNSS_DATA_CALLBACK_DEFINE(NULL, gnss_cb);
-
-struct lora_info {
-    uint16_t packet_id;
-    int8_t snr;
-    uint8_t data[255];
-    uint16_t size;
-    int16_t rssi;
-    uint32_t utc;
-    uint32_t ticks;
-};
-
 
 int main(void)
 {
     init_gpios();
     init_tim2();
-
     while(1) {
-        int val0 = gpio_pin_get_dt(&sw0);
-        int val1 = gpio_pin_get_dt(&sw1);
-        gpio_pin_set_dt(&led0, (!val0 | !val1)); 
-        prev_pps_ticks = pps_ticks;
-        pps_ticks = LL_TIM_IC_GetCaptureCH3(TIM2);
-        if (pos_hold_flag == 1) {
-        }
-        k_msleep(50);
+        gpio_pin_toggle_dt(&led0);
+        k_msleep(1000);
     }
     return(0);
 }
 
 
-K_SEM_DEFINE(info_fill_sem, 0, 1);
-K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
-K_MEM_SLAB_DEFINE(weather_slab, sizeof(struct weather_data), 10, 4);
-K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
 void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
 		     int16_t rssi, int8_t snr, void *user_data)
 {
@@ -174,17 +175,46 @@ void lora_transceiver(void)
     init_lora(&lora_dev);
     struct lora_info *info;
     struct cmd *lora_cmd; 
+    struct lora_tx *tx_data = NULL;
     while (1) {
-        // k_poll(struct k_poll_event *events, int num_events, k_timeout_t timeout)
+        tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(1));
+        if (tx_data != NULL) {
+            lora_send(lora_dev, tx_data->data, tx_data->size);
+        }
+
         k_mem_slab_alloc(&cmd_slab, (void**)&lora_cmd, K_FOREVER);
         k_mem_slab_alloc(&lora_slab, (void**)&info, K_FOREVER);
         lora_cmd->type = CMD_LORA;
         lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
-        k_sem_take(&info_fill_sem, K_FOREVER);
-        lora_cmd->data = (void*)info; 
-        k_fifo_put(&cmd_fifo, lora_cmd);
+        while (1) {
+            if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
+                lora_cmd->data = (void*)info; 
+                k_fifo_put(&cmd_fifo, lora_cmd);
+                break;
+            }
+            tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(100));
+            if (tx_data != NULL) {
+                LOG_INF("FIFO GET");
+                struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
+                lora_cfg.tx = true;
+                lora_recv_async(lora_dev, NULL, NULL);
+                if (lora_config(lora_dev, &lora_cfg) < 0) {
+                    LOG_ERR("LoRa config failed");
+                    k_msleep(1000);
+                    break;
+                }
+                LOG_INF("Sending data %s", tx_data->data);
+                lora_send(lora_dev, tx_data->data, tx_data->size);
+                lora_cfg.tx = false;
+                if (lora_config(lora_dev, &lora_cfg) < 0) {
+                    LOG_ERR("LoRa config failed");
+                    k_msleep(1000);
+                    break;
+                }
+                lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
+            }
+        }
     }
-
 }
 #define LORA_THREAD_SIZE 1024
 #define LORA_THREAD_PRIO 5
@@ -224,9 +254,10 @@ K_THREAD_DEFINE(weather_tid, WEATHER_THREAD_SIZE, collect_weather_thread, NULL, 
 int send_command(void) 
 {
     struct cmd *cmd;
-    char cmd_str[128];
+    char cmd_str[255];
     uint8_t ret = 0;
     uint8_t checksum = 0;
+    // struct lora_tx *lora_tx = k_malloc(sizeof(struct lora_tx));; 
     while(1) {
         cmd = k_fifo_get(&cmd_fifo, K_FOREVER);
         int len = 0;
@@ -234,26 +265,25 @@ int send_command(void)
         strncpy(&cmd_str[len], SERIAL_NUMBER, 4);
         len += 3;
         switch(cmd->type) {
-            case CMD_LORA:
-                ret = snprintk(&cmd_str[len], 127 - len, "LORA,");
-                len += ret;
+            case CMD_LORA: ;
                 struct lora_info *info = (struct lora_info*)cmd->data;
-                ret = snprintk(&cmd_str[len], 127 - len, "%.8s,%d,%d,%u,%u*", (info->data), info->rssi, info->snr, info->utc, info->ticks);
+                ret = snprintk(&cmd_str[len], 127 - len, 
+                        "LORA,%.8s,%d,%d,%u,%u*", 
+                        info->data, info->rssi, info->snr, info->utc, info->ticks
+                    );
                 len += ret;
-                LOG_INF("%u | %s", len, cmd_str);
                 k_mem_slab_free(&lora_slab, info);
                 break;
-            case CMD_NAV:
-                ret = snprintk(&cmd_str[len], 127 - len, "POS,");
+            case CMD_NAV: ;
+                struct navigation_data *data = (struct navigation_data*)cmd->data;
+                ret = snprintk(&cmd_str[len], 127 - len, 
+                        "POS,%lld,%lld,%d*", 
+                        data->longitude, data->latitude, data->altitude
+                    );
                 len += ret;
                 break;
             case CMD_WEATHER:
-                ret = snprintk(&cmd_str[len], 127 - len, "WTHR,");
-                len += ret;
-                struct weather_data *weather = (struct weather_data *)cmd->data;
-                ret = snprintk(&cmd_str[len], 127 - len, "%u,%u*", weather->temp, weather->humi);
-                len += ret;
-                k_mem_slab_free(&weather_slab, weather);
+                LOG_ERR("ENOTSUP");
                 break;
             case CMD_TIME:
                 ret = snprintk(&cmd_str[len], 127 - len, "TIME,");
@@ -274,6 +304,9 @@ int send_command(void)
         strncpy(&cmd_str[len], "\r\n", 3);
         len += 3;
         printk("%s", cmd_str);
+        // strncpy(lora_tx->data, cmd_str, 255);
+        // lora_tx->size = len;
+        // k_fifo_put(&lora_tx_fifo, lora_tx);
         k_mem_slab_free(&cmd_slab, cmd);
     }
     return 0;
