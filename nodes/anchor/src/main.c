@@ -21,6 +21,7 @@
 LOG_MODULE_REGISTER(anchor);
 
 #define SERIAL_NUMBER "AN0"
+#define TX_DELAY 150
 
 #define DAYS_BEFORE_AUG_2025 20301ULL
 #define SECONDS_BEFORE_AUG_2025 (DAYS_BEFORE_AUG_2025 * 86400ULL)
@@ -185,13 +186,17 @@ void lora_transceiver(void)
         lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
         while (1) {
             if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
-                lora_cmd->data = (void*)info; 
-                k_fifo_put(&cmd_fifo, lora_cmd);
+                if (strncmp(info->data, "$EN0", 3) == 0) {
+                    lora_cmd->data = (void*)info; 
+                    k_fifo_put(&cmd_fifo, lora_cmd);
+                } else {
+                    k_mem_slab_free(&lora_slab, info);
+                    k_mem_slab_free(&cmd_slab, lora_cmd);
+                }
                 break;
             }
             tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(100));
             if (tx_data != NULL) {
-                LOG_INF("FIFO GET");
                 struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
                 lora_cfg.tx = true;
                 lora_recv_async(lora_dev, NULL, NULL);
@@ -200,7 +205,7 @@ void lora_transceiver(void)
                     k_msleep(1000);
                     break;
                 }
-                LOG_INF("Sending data %s", tx_data->data);
+                k_msleep(TX_DELAY);
                 lora_send(lora_dev, tx_data->data, tx_data->size);
                 lora_cfg.tx = false;
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
