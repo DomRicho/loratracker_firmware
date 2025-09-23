@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
 
 #include <lib/lora.h>
 
@@ -17,6 +18,8 @@
 #define LOG_LEVEL CONFIG_LOG_DEFAULT_LEVEL
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(edge_node);
+
+static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 
 int main(void)
 {
@@ -32,6 +35,7 @@ int main(void)
 	}
 
 	ret = lora_config(lora_dev, &config);
+    gpio_pin_configure_dt(&sw0, GPIO_INPUT | GPIO_PULL_UP);
 	if (ret < 0) {
 		LOG_ERR("LoRa config failed");
 		return 0;
@@ -40,6 +44,7 @@ int main(void)
     int count = 0;
     char num[16] = {0};
     char tx_data[9] = {0};
+    int64_t last_timestamp = k_uptime_get();
 	while (1) {
         snprintf(num, 16,"$EN0%04d", count);
         memcpy(tx_data, num, 8);
@@ -50,12 +55,19 @@ int main(void)
 			return 0;
 		}
 		LOG_INF("Data sent %s!", tx_data);
-
-
-        k_msleep(5000);
-
+        while(1) {
+            if (gpio_pin_get_dt(&sw0) > 0) {
+                break;
+            }
+            if (k_uptime_get() - last_timestamp >= 60000) {
+                break;
+            }
+            k_msleep(10);
+        }
+        last_timestamp = k_uptime_get();
         count++;
         if (count == 9999) count = 0;
+        k_msleep(1000);
 	}
 	return 0;
 }

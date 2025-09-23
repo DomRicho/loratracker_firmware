@@ -1,3 +1,4 @@
+#include "zephyr/pm/state.h"
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,7 +47,7 @@ struct cmd {
 };
 
 struct weather_data {
-    int16_t temp;
+    uint16_t temp;
     uint16_t humi;
 };
 
@@ -143,9 +144,7 @@ GNSS_DATA_CALLBACK_DEFINE(NULL, gnss_cb);
 int main(void)
 {
     init_gpios();
-    init_tim2();
     while(1) {
-        gpio_pin_toggle_dt(&led0);
         k_msleep(1000);
     }
     return(0);
@@ -159,23 +158,28 @@ void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
     struct lora_info *info = (struct lora_info*)user_data;
     lora_ticks = LL_TIM_IC_GetCaptureCH1(TIM2);
     info->utc = utc_timestamp;
-    info->ticks = lora_ticks;
+    info->ticks = lora_ticks - pps_ticks;
     info->rssi = rssi;
     info->snr = snr;
     memcpy(info->data, data, size);
     info->size = size;
     gpio_pin_toggle_dt(&led1);
-    k_sem_give(&info_fill_sem);
     lora_recv_async(dev, NULL, NULL);
+    k_sem_give(&info_fill_sem);
 }
 
 void lora_transceiver(void)
 {
     const struct device *lora_dev = NULL;
+    init_tim2();
     init_lora(&lora_dev);
     struct lora_info *info;
     struct cmd *lora_cmd; 
     struct lora_tx *tx_data = NULL;
+    uint8_t tmp[255];
+    uint8_t size = 255;
+    int16_t rssi = 0;
+    int8_t snr = 0;
     while (1) {
         tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(1));
         if (tx_data != NULL) {
@@ -188,22 +192,42 @@ void lora_transceiver(void)
         lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
         while (1) {
             if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
-                lora_cmd->data = (void*)info; 
-                k_fifo_put(&cmd_fifo, lora_cmd);
+                if (strncmp(info->data, "$EN", 3) == 0) {
+                    lora_cmd->data = (void*)info; 
+                    k_fifo_put(&cmd_fifo, lora_cmd);
+                    struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
+                    lora_cfg.tx = true;
+                    lora_config(lora_dev, &lora_cfg);
+                    lora_send(lora_dev, "$GW0GETAN0LORA", strlen("$GW0GETAN0LORA"));
+                    lora_cfg.tx = false;
+                    lora_config(lora_dev, &lora_cfg);
+                    size = lora_recv(lora_dev, tmp, 255, K_FOREVER, &rssi, &snr);
+                    tmp[size] = '\0';
+                    LOG_INF("%d | %s", size, tmp);
+                    printk("%s", tmp);
+                    // lora_cfg.tx = true;
+                    // lora_config(lora_dev, &lora_cfg);
+                    // lora_send(lora_dev, "$GW0GETAN1LORA", strlen("$GW0GETAN1LORA"));
+                    // lora_cfg.tx = false;
+                    // lora_config(lora_dev, &lora_cfg);
+                    // size = lora_recv(lora_dev, tmp, 255, K_FOREVER, &rssi, &snr);
+                    // tmp[size] = '\0';
+                    // printk("%s", tmp);
+                } else if (strncmp(info->data, "$AN", 3) == 0) {
+                    printk("%s", info->data);
+                }
                 break;
             }
             tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(100));
             if (tx_data != NULL) {
-                LOG_INF("FIFO GET");
+                lora_recv_async(lora_dev, NULL, NULL);
                 struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
                 lora_cfg.tx = true;
-                lora_recv_async(lora_dev, NULL, NULL);
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
                     LOG_ERR("LoRa config failed");
                     k_msleep(1000);
                     break;
                 }
-                LOG_INF("Sending data %s", tx_data->data);
                 lora_send(lora_dev, tx_data->data, tx_data->size);
                 lora_cfg.tx = false;
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
@@ -246,7 +270,7 @@ void collect_weather_thread(void)
 }
 #define WEATHER_THREAD_SIZE 1024
 #define WEATHER_THREAD_PRIO 5
-K_THREAD_DEFINE(weather_tid, WEATHER_THREAD_SIZE, collect_weather_thread, NULL, NULL, NULL, WEATHER_THREAD_PRIO, 0, 0);
+// K_THREAD_DEFINE(weather_tid, WEATHER_THREAD_SIZE, collect_weather_thread, NULL, NULL, NULL, WEATHER_THREAD_PRIO, 0, 0);
 
 /*
  * $GW0LORA,93,9,18000000000,1600000000*5c\r\n
@@ -275,15 +299,21 @@ int send_command(void)
                 k_mem_slab_free(&lora_slab, info);
                 break;
             case CMD_NAV: ;
-                struct navigation_data *data = (struct navigation_data*)cmd->data;
+                struct navigation_data *nav_data = (struct navigation_data*)cmd->data;
                 ret = snprintk(&cmd_str[len], 127 - len, 
                         "POS,%lld,%lld,%d*", 
-                        data->longitude, data->latitude, data->altitude
+                        nav_data->longitude, nav_data->latitude, nav_data->altitude
                     );
                 len += ret;
                 break;
-            case CMD_WEATHER:
-                LOG_ERR("ENOTSUP");
+            case CMD_WEATHER: ;
+                struct weather_data *wthr_data = (struct weather_data*)cmd->data;
+                ret = snprintk(&cmd_str[len], 127 - len, 
+                        "WTHR,%u,%u*", 
+                        wthr_data->temp, wthr_data->humi
+                    );
+                len += ret;
+                k_mem_slab_free(&weather_slab, wthr_data);
                 break;
             case CMD_TIME:
                 ret = snprintk(&cmd_str[len], 127 - len, "TIME,");

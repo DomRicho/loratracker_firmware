@@ -21,6 +21,8 @@
 LOG_MODULE_REGISTER(anchor);
 
 #define SERIAL_NUMBER "AN0"
+#define GET_ANCHOR_NAV_CMD "$GW0GETAN0NAV"
+#define GET_ANCHOR_LORA_CMD "$GW0GETAN0LORA"
 #define TX_DELAY 150
 
 #define DAYS_BEFORE_AUG_2025 20301ULL
@@ -53,7 +55,7 @@ int print_command(char *talker_id, void *data, enum cmd_type data_type);
 K_SEM_DEFINE(info_fill_sem, 0, 1);
 K_FIFO_DEFINE(lora_tx_fifo);
 K_FIFO_DEFINE(cmd_fifo);
-K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
+K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 8, 4);
 K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
 
 #define GNSS_MODEM DEVICE_DT_GET(DT_ALIAS(gnss))
@@ -97,7 +99,7 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
         case GNSS_SAMPLE_STATE:
             if (data->info.pos_hold == 1) {
                 memcpy(&location, &data->nav_hold, sizeof(struct navigation_data));
-                k_fifo_put(&cmd_fifo, &nav_data);
+                // k_fifo_put(&cmd_fifo, &nav_data);
                 LOG_INF("Sampling Done.");
                 gnss_state = GNSS_POSHOLD_STATE;
             }
@@ -129,7 +131,6 @@ int main(void)
     init_gpios();
     init_tim2();
     while(1) {
-        gpio_pin_toggle_dt(&led0);
         k_msleep(1000);
     }
     return(0);
@@ -157,55 +158,73 @@ void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
     struct lora_info *info = (struct lora_info*)user_data;
     lora_ticks = LL_TIM_IC_GetCaptureCH1(TIM2);
     info->utc = utc_timestamp;
-    info->ticks = lora_ticks;
+    info->ticks = lora_ticks - pps_ticks;
     info->rssi = rssi;
     info->snr = snr;
     memcpy(info->data, data, size);
     info->size = size;
+    info->data[size] = '\0';
     gpio_pin_toggle_dt(&led1);
-    k_sem_give(&info_fill_sem);
     lora_recv_async(dev, NULL, NULL);
+    k_sem_give(&info_fill_sem);
 }
 
 void lora_transceiver(void)
 {
     const struct device *lora_dev = NULL;
     init_lora(&lora_dev);
-    struct lora_info *info;
-    struct cmd *lora_cmd; 
+    struct lora_info *info = NULL;
+    struct cmd *lora_cmd = NULL; 
     struct lora_tx *tx_data = NULL;
     while (1) {
-        tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(1));
-        if (tx_data != NULL) {
-            lora_send(lora_dev, tx_data->data, tx_data->size);
+        if (info == NULL) {
+            k_mem_slab_alloc(&lora_slab, (void **)&info, K_FOREVER);
+            lora_recv_async(lora_dev, lora_info_recv_cb, (void *)info);
         }
 
-        k_mem_slab_alloc(&cmd_slab, (void**)&lora_cmd, K_FOREVER);
-        k_mem_slab_alloc(&lora_slab, (void**)&info, K_FOREVER);
-        lora_cmd->type = CMD_LORA;
-        lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
-        while (1) {
-            if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
-                if (strncmp(info->data, "$EN0", 3) == 0) {
-                    lora_cmd->data = (void*)info; 
+        if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
+            printk("%s\n", info->data);
+            if (strncmp(info->data, "$EN0", 3) == 0) {
+                if (lora_cmd == NULL) {
+                    k_mem_slab_alloc(&cmd_slab, (void **)&lora_cmd, K_FOREVER);
+                } else {
+                    k_mem_slab_free(&lora_slab, lora_cmd->data);
+                }
+                lora_cmd->type = CMD_LORA;
+                lora_cmd->data = (void*)info; 
+                info = NULL;
+            } else if (strncmp(info->data, GET_ANCHOR_NAV_CMD, strlen(GET_ANCHOR_NAV_CMD)) == 0 ) {
+                k_fifo_put(&cmd_fifo, &nav_data);
+                k_mem_slab_free(&lora_slab, info);
+                info = NULL;
+            } else if (strncmp(info->data, GET_ANCHOR_LORA_CMD, strlen(GET_ANCHOR_LORA_CMD)) == 0 ) {
+                if (lora_cmd != NULL) {
                     k_fifo_put(&cmd_fifo, lora_cmd);
+                    k_mem_slab_free(&lora_slab, info);
+                    info = NULL;
+                    lora_cmd = NULL;
                 } else {
                     k_mem_slab_free(&lora_slab, info);
-                    k_mem_slab_free(&cmd_slab, lora_cmd);
+                    info = NULL;
                 }
-                break;
+            } else {
+                k_mem_slab_free(&lora_slab, info);
+                info = NULL;
             }
-            tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(100));
+            if (info == NULL) {
+                lora_recv_async(lora_dev, NULL, NULL);
+            }
+        } else {
+            tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(10));
             if (tx_data != NULL) {
+                lora_recv_async(lora_dev, NULL, NULL);
                 struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
                 lora_cfg.tx = true;
-                lora_recv_async(lora_dev, NULL, NULL);
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
                     LOG_ERR("LoRa config failed");
                     k_msleep(1000);
                     break;
                 }
-                k_msleep(TX_DELAY);
                 lora_send(lora_dev, tx_data->data, tx_data->size);
                 lora_cfg.tx = false;
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
@@ -213,11 +232,13 @@ void lora_transceiver(void)
                     k_msleep(1000);
                     break;
                 }
-                lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
+                if (info == NULL) {
+                    k_mem_slab_alloc(&lora_slab, (void **)&info, K_FOREVER);
+                }
+                lora_recv_async(lora_dev, lora_info_recv_cb, (void *)info);
             }
         }
     }
-
 }
 #define LORA_THREAD_SIZE 1024
 #define LORA_THREAD_PRIO 5
@@ -235,6 +256,11 @@ int send_command(void)
     struct lora_tx *lora_tx = k_malloc(sizeof(struct lora_tx));; 
     while(1) {
         cmd = k_fifo_get(&cmd_fifo, K_FOREVER);
+        if (cmd->data == NULL) {
+            LOG_ERR("No Data");
+            k_mem_slab_free(&cmd_slab, cmd);
+            continue;
+        }
         int len = 0;
         cmd_str[len++] = '$';
         strncpy(&cmd_str[len], SERIAL_NUMBER, 4);
@@ -278,7 +304,7 @@ int send_command(void)
         len += ret;
         strncpy(&cmd_str[len], "\r\n", 3);
         len += 3;
-        printk("%s", cmd_str);
+        printk("%.8s", cmd_str);
         strncpy(lora_tx->data, cmd_str, 255);
         lora_tx->size = len;
         LOG_INF("%s", lora_tx->data);

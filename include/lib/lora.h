@@ -18,19 +18,18 @@
 }                               \
 
 struct lora_info {
-    uint16_t packet_id;
-    int8_t snr;
-    uint8_t data[255];
-    uint16_t size;
-    int16_t rssi;
     uint32_t utc;
     uint32_t ticks;
+    int16_t rssi;
+    int8_t snr;
+    uint16_t size;
+    uint8_t data[256];
 };
 
 struct lora_tx {
     void *fifo_reserved;
-    uint8_t data[255];
     uint16_t size;
+    uint8_t data[256];
 }; 
 
 #endif
