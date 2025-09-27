@@ -53,6 +53,7 @@ int init_tim2(void);
 int print_command(char *talker_id, void *data, enum cmd_type data_type);
 
 K_SEM_DEFINE(info_fill_sem, 0, 1);
+K_SEM_DEFINE(time_sem, 1, 1);
 K_FIFO_DEFINE(lora_tx_fifo);
 K_FIFO_DEFINE(cmd_fifo);
 K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 8, 4);
@@ -78,8 +79,6 @@ enum gnss_state gnss_state = GNSS_INIT_STATE;
 
 static void gnss_cb(const struct device *dev, const struct gnss_data *data)
 {
-    prev_pps_ticks = pps_ticks;
-    pps_ticks = LL_TIM_IC_GetCaptureCH3(TIM2);
     switch(gnss_state) {
         case GNSS_INIT_STATE:
             if (data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
@@ -99,7 +98,7 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
         case GNSS_SAMPLE_STATE:
             if (data->info.pos_hold == 1) {
                 memcpy(&location, &data->nav_hold, sizeof(struct navigation_data));
-                // k_fifo_put(&cmd_fifo, &nav_data);
+                k_fifo_put(&cmd_fifo, &nav_data);
                 LOG_INF("Sampling Done.");
                 gnss_state = GNSS_POSHOLD_STATE;
             }
@@ -114,11 +113,15 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
             }
             days += (data->utc.month_day - 1);
             // LOG_INF("%d %d %u %u %u", utc.month, days, utc.hour, utc.minute, utc.millisecond/1000);
+            k_sem_take(&time_sem, K_FOREVER);
+            prev_pps_ticks = pps_ticks;
+            pps_ticks = LL_TIM_IC_GetCaptureCH3(TIM2);
             utc_timestamp = SECONDS_BEFORE_AUG_2025;
             utc_timestamp += days * 86400ULL;
             utc_timestamp += utc.hour * 3600ULL;
             utc_timestamp += utc.minute * 60ULL;
             utc_timestamp += utc.millisecond / 1000ULL;
+            k_sem_give(&time_sem);
             break;
         default:
             break;
@@ -157,8 +160,10 @@ void lora_info_recv_cb(const struct device *dev, uint8_t *data, uint16_t size,
 	ARG_UNUSED(dev);
     struct lora_info *info = (struct lora_info*)user_data;
     lora_ticks = LL_TIM_IC_GetCaptureCH1(TIM2);
+    k_sem_take(&time_sem, K_FOREVER);
     info->utc = utc_timestamp;
     info->ticks = lora_ticks - pps_ticks;
+    k_sem_give(&time_sem);
     info->rssi = rssi;
     info->snr = snr;
     memcpy(info->data, data, size);

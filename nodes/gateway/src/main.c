@@ -64,6 +64,11 @@ K_MEM_SLAB_DEFINE(lora_slab, sizeof(struct lora_info), 3, 4);
 K_MEM_SLAB_DEFINE(cmd_slab, sizeof(struct cmd), 15, 4);
 K_MEM_SLAB_DEFINE(weather_slab, sizeof(struct weather_data), 3, 4);
 
+static struct gpio_callback sw0_cb_data;
+K_SEM_DEFINE(sw0_press_sem, 0, 1);
+static struct gpio_callback sw1_cb_data;
+K_SEM_DEFINE(sw1_press_sem, 0, 1);
+
 int init_gpios(void);
 int init_lora(const struct device** lora_dev);
 int init_tim2(void);
@@ -128,7 +133,6 @@ static void gnss_cb(const struct device *dev, const struct gnss_data *data)
                 days += days_in_month[m-1];
             }
             days += (data->utc.month_day - 1);
-            // LOG_INF("%d %d %u %u %u", utc.month, days, utc.hour, utc.minute, utc.millisecond/1000);
             utc_timestamp = SECONDS_BEFORE_AUG_2025;
             utc_timestamp += days * 86400ULL;
             utc_timestamp += utc.hour * 3600ULL;
@@ -144,8 +148,22 @@ GNSS_DATA_CALLBACK_DEFINE(NULL, gnss_cb);
 int main(void)
 {
     init_gpios();
+    struct lora_tx get_nav_an0 = {
+        .data = "$GW0GETAN0NAV", 
+        .size = strlen("$GW0GETAN0NAV"),
+    };
+    struct lora_tx get_nav_an1 = {
+        .data = "$GW0GETAN1NAV", 
+        .size = strlen("$GW0GETAN1NAV"),
+    };
     while(1) {
-        k_msleep(1000);
+        if (k_sem_take(&sw0_press_sem, K_MSEC(100)) == 0) {
+            k_fifo_put(&lora_tx_fifo, &get_nav_an0);
+            k_fifo_put(&cmd_fifo, &nav_data);
+        }
+        if (k_sem_take(&sw1_press_sem, K_MSEC(100)) == 0) {
+            k_fifo_put(&lora_tx_fifo, &get_nav_an1);
+        }
     }
     return(0);
 }
@@ -173,7 +191,7 @@ void lora_transceiver(void)
     const struct device *lora_dev = NULL;
     init_tim2();
     init_lora(&lora_dev);
-    struct lora_info *info;
+    struct lora_info *info = NULL;
     struct cmd *lora_cmd; 
     struct lora_tx *tx_data = NULL;
     uint8_t tmp[255];
@@ -181,68 +199,79 @@ void lora_transceiver(void)
     int16_t rssi = 0;
     int8_t snr = 0;
     while (1) {
-        tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(1));
-        if (tx_data != NULL) {
-            lora_send(lora_dev, tx_data->data, tx_data->size);
+        if (info == NULL) {
+            k_mem_slab_alloc(&lora_slab, (void **)&info, K_FOREVER);
+            lora_recv_async(lora_dev, lora_info_recv_cb, (void *)info);
         }
 
-        k_mem_slab_alloc(&cmd_slab, (void**)&lora_cmd, K_FOREVER);
-        k_mem_slab_alloc(&lora_slab, (void**)&info, K_FOREVER);
-        lora_cmd->type = CMD_LORA;
-        lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
-        while (1) {
-            if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
-                if (strncmp(info->data, "$EN", 3) == 0) {
-                    lora_cmd->data = (void*)info; 
-                    k_fifo_put(&cmd_fifo, lora_cmd);
-                    struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
-                    lora_cfg.tx = true;
-                    lora_config(lora_dev, &lora_cfg);
-                    lora_send(lora_dev, "$GW0GETAN0LORA", strlen("$GW0GETAN0LORA"));
-                    lora_cfg.tx = false;
-                    lora_config(lora_dev, &lora_cfg);
-                    size = lora_recv(lora_dev, tmp, 255, K_FOREVER, &rssi, &snr);
-                    tmp[size] = '\0';
-                    LOG_INF("%d | %s", size, tmp);
-                    printk("%s", tmp);
-                    // lora_cfg.tx = true;
-                    // lora_config(lora_dev, &lora_cfg);
-                    // lora_send(lora_dev, "$GW0GETAN1LORA", strlen("$GW0GETAN1LORA"));
-                    // lora_cfg.tx = false;
-                    // lora_config(lora_dev, &lora_cfg);
-                    // size = lora_recv(lora_dev, tmp, 255, K_FOREVER, &rssi, &snr);
-                    // tmp[size] = '\0';
-                    // printk("%s", tmp);
-                } else if (strncmp(info->data, "$AN", 3) == 0) {
-                    printk("%s", info->data);
+        if (k_sem_take(&info_fill_sem, K_MSEC(1)) == 0) {
+            if (strncmp(info->data, "$EN0", 3) == 0) {
+                if (lora_cmd == NULL) {
+                    k_mem_slab_alloc(&cmd_slab, (void **)&lora_cmd, K_FOREVER);
+                } else {
+                    k_mem_slab_free(&lora_slab, lora_cmd->data);
                 }
-                break;
+                lora_cmd->type = CMD_LORA;
+                lora_cmd->data = (void*)info; 
+                k_fifo_put(&cmd_fifo, lora_cmd);
+                struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
+                lora_cfg.tx = true;
+                lora_config(lora_dev, &lora_cfg);
+                lora_send(lora_dev, "$GW0GETAN0LORA", strlen("$GW0GETAN0LORA"));
+                lora_cfg.tx = false;
+                lora_config(lora_dev, &lora_cfg);
+                size = lora_recv(lora_dev, tmp, 255, K_FOREVER, &rssi, &snr);
+                tmp[size] = '\0';
+                printk("%s", tmp);
+                k_msleep(1);
+                lora_cfg.tx = true;
+                lora_config(lora_dev, &lora_cfg);
+                lora_send(lora_dev, "$GW0GETAN1LORA", strlen("$GW0GETAN1LORA"));
+                lora_cfg.tx = false;
+                lora_config(lora_dev, &lora_cfg);
+                size = lora_recv(lora_dev, tmp, 255, K_FOREVER, &rssi, &snr);
+                tmp[size] = '\0';
+                printk("%s", tmp);
+                info = NULL;
+            } else if (strncmp(info->data, "$AN", 3) == 0) {
+                printk("%s", info->data);
+                k_mem_slab_free(&lora_slab, info);
+                info = NULL;
+            } else {
+                k_mem_slab_free(&lora_slab, info);
+                info = NULL;
             }
-            tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(100));
+            if (info == NULL) {
+                lora_recv_async(lora_dev, NULL, NULL);
+            }
+        } else {
+            tx_data = (struct lora_tx *)k_fifo_get(&lora_tx_fifo, K_MSEC(10));
             if (tx_data != NULL) {
                 lora_recv_async(lora_dev, NULL, NULL);
                 struct lora_modem_config lora_cfg = DEFAULT_LORA_CFG;
                 lora_cfg.tx = true;
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
                     LOG_ERR("LoRa config failed");
-                    k_msleep(1000);
                     break;
                 }
                 lora_send(lora_dev, tx_data->data, tx_data->size);
                 lora_cfg.tx = false;
                 if (lora_config(lora_dev, &lora_cfg) < 0) {
                     LOG_ERR("LoRa config failed");
-                    k_msleep(1000);
                     break;
                 }
-                lora_recv_async(lora_dev, lora_info_recv_cb, (void*)info);
+                if (info == NULL) {
+                    k_mem_slab_alloc(&lora_slab, (void **)&info, K_FOREVER);
+                }
+                lora_recv_async(lora_dev, lora_info_recv_cb, (void *)info);
             }
         }
     }
 }
 #define LORA_THREAD_SIZE 1024
 #define LORA_THREAD_PRIO 5
-K_THREAD_DEFINE(lora_tid, LORA_THREAD_SIZE, lora_transceiver, NULL, NULL, NULL, LORA_THREAD_PRIO, 0, 0);
+K_THREAD_DEFINE(lora_tid, LORA_THREAD_SIZE, lora_transceiver, NULL, NULL, NULL, 
+        LORA_THREAD_PRIO, 0, 0);
 
 void collect_weather_thread(void)
 {
@@ -258,7 +287,8 @@ void collect_weather_thread(void)
         if(sensor_sample_fetch(sen0546) < 0) {
             LOG_ERR("Could not fetch sample");
         }
-        if (sensor_channel_get(sen0546, SENSOR_CHAN_AMBIENT_TEMP, &weather) < 0) {
+        if (sensor_channel_get(sen0546, SENSOR_CHAN_AMBIENT_TEMP, &weather) < 0) 
+        {
             LOG_ERR("Could not get channel");
         }
         data->temp = (uint16_t)weather.val1;
@@ -270,7 +300,8 @@ void collect_weather_thread(void)
 }
 #define WEATHER_THREAD_SIZE 1024
 #define WEATHER_THREAD_PRIO 5
-// K_THREAD_DEFINE(weather_tid, WEATHER_THREAD_SIZE, collect_weather_thread, NULL, NULL, NULL, WEATHER_THREAD_PRIO, 0, 0);
+K_THREAD_DEFINE(weather_tid, WEATHER_THREAD_SIZE, collect_weather_thread, NULL, 
+        NULL, NULL, WEATHER_THREAD_PRIO, 0, 0);
 
 /*
  * $GW0LORA,93,9,18000000000,1600000000*5c\r\n
@@ -343,7 +374,20 @@ int send_command(void)
 }
 #define CMD_THREAD_SIZE 1024
 #define CMD_THREAD_PRIO 5
-K_THREAD_DEFINE(cmd_tid, CMD_THREAD_SIZE, send_command, NULL, NULL, NULL, CMD_THREAD_PRIO, 0, 0);
+K_THREAD_DEFINE(cmd_tid, CMD_THREAD_SIZE, send_command, NULL, NULL, NULL, 
+        CMD_THREAD_PRIO, 0, 0);
+
+void sw0_pressed(const struct device *dev, struct gpio_callback *cb,
+            uint32_t pins)
+{
+    k_sem_give(&sw0_press_sem);
+}
+
+void sw1_pressed(const struct device *dev, struct gpio_callback *cb,
+            uint32_t pins)
+{
+    k_sem_give(&sw1_press_sem);
+}
 
 int init_gpios(void)
 {
@@ -355,10 +399,16 @@ int init_gpios(void)
         printk("Error: one or more devices not ready\n");
         return -1;
     }
-    gpio_pin_configure_dt(&led0, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&led0, GPIO_OUTPUT_ACTIVE);
     gpio_pin_configure_dt(&led1, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&led2, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&sw0, GPIO_INPUT | GPIO_PULL_UP);
+    gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_EDGE_TO_ACTIVE);
+    gpio_init_callback(&sw0_cb_data, sw0_pressed, BIT(sw0.pin));
+    gpio_add_callback(sw0.port, &sw0_cb_data);
+    gpio_pin_interrupt_configure_dt(&sw1, GPIO_INT_EDGE_TO_ACTIVE);
+    gpio_init_callback(&sw1_cb_data, sw1_pressed, BIT(sw1.pin));
+    gpio_add_callback(sw1.port, &sw1_cb_data);
     gpio_pin_configure_dt(&sw1, GPIO_INPUT | GPIO_PULL_UP);
     return 0;
 }
